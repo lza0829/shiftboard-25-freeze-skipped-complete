@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS handover_start_keys (
   outcome TEXT NOT NULL CHECK (outcome IN ('纳入', '排除')),
   reason TEXT NOT NULL DEFAULT '',
   detail TEXT NOT NULL DEFAULT '',
+  recheck_outcome TEXT,
+  recheck_status TEXT,
+  rechecked_at TEXT,
   PRIMARY KEY (handover_id, batch_id)
 );
 CREATE TABLE IF NOT EXISTS reconcile_reports (
@@ -74,6 +77,11 @@ _MIGRATIONS = {
     "handovers": {
         "excluded_count": "INTEGER NOT NULL DEFAULT 0",
         "snapshot_at": "TEXT",
+    },
+    "handover_start_keys": {
+        "recheck_outcome": "TEXT",
+        "recheck_status": "TEXT",
+        "rechecked_at": "TEXT",
     },
 }
 

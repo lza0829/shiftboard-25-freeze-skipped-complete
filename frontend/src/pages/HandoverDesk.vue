@@ -23,6 +23,11 @@ async function refresh() {
 
 const processing = computed(() => current.value?.status === '进行中')
 
+// 排除数与裁决证明均从同一 payload 的 adjudication/snapshot 派生，单源展示
+const adjudication = computed(
+  () => current.value?.adjudication || { 纳入数: 0, 排除数: 0, 重检通过数: 0, 重检阻断数: 0 }
+)
+
 onMounted(async () => {
   try {
     await refresh()
@@ -40,7 +45,7 @@ async function start() {
       to_shift_id: Number(toId.value),
     })
     ok.value = true
-    msg.value = `已开交班单 #${current.value.id}，清单 ${current.value.batch_count} 批`
+    msg.value = `已开交班单 #${current.value.id}，清单 ${current.value.batch_count} 批，发起排除 ${current.value.adjudication?.排除数 ?? current.value.excluded_count} 批`
     await refresh()
   } catch (e) {
     msg.value = String(e.message || e)
@@ -95,7 +100,8 @@ async function complete() {
       <p v-if="current.reason" class="msg">{{ current.reason }}</p>
       <p class="lead" style="margin-bottom:12px">
         {{ current.from_shift_name }} → {{ current.to_shift_name }} ·
-        清单 {{ current.batch_count }} 批 · 排除 {{ current.excluded_count }} 批
+        清单 {{ current.batch_count }} 批 · 排除 {{ adjudication.排除数 }} 批
+        <span v-if="adjudication.重检阻断数"> · 重检阻断 {{ adjudication.重检阻断数 }} 键</span>
         <span v-if="current.冻结数"> · 清单内冻结 {{ current.冻结数 }} 批（完成将整单失败）</span>
       </p>
       <table>
@@ -108,15 +114,35 @@ async function complete() {
           </tr>
         </tbody>
       </table>
-      <template v-if="(current.snapshot || []).some((s) => s.outcome === '排除')">
-        <h2 style="margin-top:18px">发起时排除明细（已固化）</h2>
+      <template v-if="(current.snapshot || []).length">
+        <h2 style="margin-top:18px">裁决证明（发起快照 + 完成重检，已固化）</h2>
+        <p class="lead">
+          纳入 {{ adjudication.纳入数 }} 键 · 排除 {{ adjudication.排除数 }} 键 ·
+          重检通过 {{ adjudication.重检通过数 }} 键 · 重检阻断 {{ adjudication.重检阻断数 }} 键
+        </p>
         <table>
-          <thead><tr><th>业务键</th><th>排除原因</th><th>详情</th></tr></thead>
+          <thead>
+            <tr>
+              <th>业务键</th><th>发起裁决</th><th>原因</th><th>详情</th>
+              <th>完成重检</th><th>重检时状态</th><th>重检时间</th>
+            </tr>
+          </thead>
           <tbody>
-            <tr v-for="s in current.snapshot.filter((x) => x.outcome === '排除')" :key="s.batch_id">
+            <tr v-for="s in current.snapshot" :key="s.batch_id">
               <td>{{ s.biz_key }}</td>
+              <td><span class="tag" :class="{ danger: s.outcome === '排除' }">{{ s.outcome }}</span></td>
               <td>{{ s.reason }}</td>
               <td>{{ s.detail || '—' }}</td>
+              <td>
+                <span
+                  v-if="s.recheck_outcome"
+                  class="tag"
+                  :class="{ on: s.recheck_outcome === '通过', danger: s.recheck_outcome === '阻断' }"
+                >{{ s.recheck_outcome }}</span>
+                <span v-else>—</span>
+              </td>
+              <td>{{ s.recheck_status || '—' }}</td>
+              <td>{{ s.rechecked_at || '—' }}</td>
             </tr>
           </tbody>
         </table>

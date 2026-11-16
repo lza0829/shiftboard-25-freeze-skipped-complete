@@ -147,6 +147,33 @@ def list_handovers() -> list[dict]:
         return rows_to_dicts(rows)
 
 
+def _snapshot_keys(conn, handover_id: int) -> list[dict]:
+    """发起快照表逐键裁决记录（含完成时重检结果），只读拼装。"""
+    rows = conn.execute(
+        """
+        SELECT hk.*, b.title, b.status AS current_status
+        FROM handover_start_keys hk
+        JOIN batches b ON b.id = hk.batch_id
+        WHERE hk.handover_id = ?
+        ORDER BY hk.outcome DESC, hk.batch_id
+        """,
+        (handover_id,),
+    ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def _adjudication_summary(keys: list[dict]) -> dict:
+    """裁决证明汇总：由快照逐键记录派生，与明细同源。"""
+    included = [k for k in keys if k["outcome"] == "纳入"]
+    excluded = [k for k in keys if k["outcome"] == "排除"]
+    return {
+        "纳入数": len(included),
+        "排除数": len(excluded),
+        "重检通过数": sum(1 for k in included if k.get("recheck_outcome") == "通过"),
+        "重检阻断数": sum(1 for k in included if k.get("recheck_outcome") == "阻断"),
+    }
+
+
 def get_handover(handover_id: int) -> dict:
     with read() as conn:
         h = conn.execute(
@@ -173,20 +200,39 @@ def get_handover(handover_id: int) -> dict:
             """,
             (handover_id,),
         ).fetchall()
-        snapshot = conn.execute(
-            """
-            SELECT hk.*, b.title, b.status AS current_status
-            FROM handover_start_keys hk
-            JOIN batches b ON b.id = hk.batch_id
-            WHERE hk.handover_id = ?
-            ORDER BY hk.outcome DESC, hk.batch_id
-            """,
-            (handover_id,),
-        ).fetchall()
+        snapshot = _snapshot_keys(conn, handover_id)
         out = dict(h)
         out["items"] = [_batch_dict(r) for r in items]
-        out["snapshot"] = rows_to_dicts(snapshot)
+        out["snapshot"] = snapshot
+        out["adjudication"] = _adjudication_summary(snapshot)
         out["冻结数"] = sum(1 for r in items if r["status"] == STATUS_FROZEN)
+        return out
+
+
+def get_adjudication(handover_id: int) -> dict:
+    """按交班单 id 查询排除/冻结裁决证明（只读）：
+
+    纳入键、排除键及原因、完成时重检结果，全部来自发起快照表，单源派生。
+    """
+    with read() as conn:
+        h = conn.execute(
+            "SELECT * FROM handovers WHERE id = ?", (handover_id,)
+        ).fetchone()
+        if not h:
+            raise HTTPException(404, "交班单不存在")
+        keys = _snapshot_keys(conn, handover_id)
+        out = _adjudication_summary(keys)
+        out.update(
+            {
+                "handover_id": handover_id,
+                "status": h["status"],
+                "reason": h["reason"],
+                "snapshot_at": h["snapshot_at"],
+                "started_at": h["started_at"],
+                "finished_at": h["finished_at"],
+                "keys": keys,
+            }
+        )
         return out
 
 
@@ -300,6 +346,19 @@ def start_handover(from_shift_id: int, to_shift_id: int) -> dict:
     return get_handover(hid)
 
 
+def _persist_rechecks(conn, handover_id: int, rechecks: list, now: str) -> None:
+    """完成时重检结果固化：清单内每键一行，写回发起快照表，同事务同事态。"""
+    for b, ok in rechecks:
+        conn.execute(
+            """
+            UPDATE handover_start_keys
+            SET recheck_outcome = ?, recheck_status = ?, rechecked_at = ?
+            WHERE handover_id = ? AND batch_id = ? AND outcome = '纳入'
+            """,
+            ("通过" if ok else "阻断", b["status"], now, handover_id, b["id"]),
+        )
+
+
 def complete_handover(handover_id: int) -> dict:
     with transaction() as conn:
         h = conn.execute("SELECT * FROM handovers WHERE id = ?", (handover_id,)).fetchone()
@@ -313,38 +372,50 @@ def complete_handover(handover_id: int) -> dict:
         ).fetchall()
         before = len(items)
 
-        # 完成前重读清单内每键当前状态：任一键冻结（或已非在途）即整单失败。
-        # 检测与回滚同一事务，且检测发生在任何过户之前——零半截过户。
+        # 完成前重检：同一事务内重读清单内每键当前状态，任一键已非在途
+        # （冻结/待确认/已结清/报废）即整单失败。重检先于任何过户，且与过户
+        # 同处 BEGIN IMMEDIATE 事务——检测通过到过户之间不可能有第三方写入。
+        rechecks = []
         blocked = []
+        for it in items:
+            b = conn.execute(
+                "SELECT * FROM batches WHERE id = ?", (it["batch_id"],)
+            ).fetchone()
+            ok = b["status"] == STATUS_INFLIGHT
+            rechecks.append((b, ok))
+            if not ok:
+                blocked.append(b)
 
-        if before == 0:
-            if blocked:
-                frozen = [r for r in blocked if r["status"] == STATUS_FROZEN]
-                if frozen:
-                    reason = "交班进行中清单内批次被冻结，整单失败：" + "、".join(
-                        f"{r['biz_key']}（{r['freeze_reason'] or '冻结'}）" for r in frozen
-                    )
-                else:
-                    reason = "交班进行中清单内批次状态变化，整单失败：" + "、".join(
-                        f"{r['biz_key']}（{r['status']}）" for r in blocked
-                    )
+        now = _now()
+        if blocked or before == 0:
+            frozen = [b for b in blocked if b["status"] == STATUS_FROZEN]
+            if frozen:
+                reason = "交班进行中清单内批次被冻结，整单失败：" + "、".join(
+                    f"{b['biz_key']}（{b['freeze_reason'] or '冻结'}）" for b in frozen
+                )
+            elif blocked:
+                reason = "交班进行中清单内批次状态变化，整单失败：" + "、".join(
+                    f"{b['biz_key']}（{b['status']}）" for b in blocked
+                )
             else:
                 reason = "交班清单为空，整单失败"
+            # 回滚本趟归属/托管变更：重检先于过户，本趟尚未写入任何批次归属，
+            # 无半截过户可留；只需复原双方班次状态并固化失败与重检证明。
             conn.execute(
                 "UPDATE handovers SET status = '失败', reason = ?, finished_at = ? WHERE id = ?",
-                (reason, _now(), handover_id),
+                (reason, now, handover_id),
             )
-            # 本趟未发生任何归属变更，仅复原双方班次状态
             conn.execute(
                 "UPDATE shifts SET status = '值班中' WHERE id = ?", (h["from_shift_id"],)
             )
             conn.execute(
                 "UPDATE shifts SET status = '空闲' WHERE id = ?", (h["to_shift_id"],)
             )
+            _persist_rechecks(conn, handover_id, rechecks, now)
             detail = {
                 "交班前清单": before,
-                "阻断键": [r["biz_key"] for r in blocked],
-                "冻结键": [r["biz_key"] for r in blocked if r["status"] == STATUS_FROZEN],
+                "阻断键": [b["biz_key"] for b in blocked],
+                "冻结键": [b["biz_key"] for b in frozen],
                 "过户数": 0,
             }
             conn.execute(
@@ -360,16 +431,19 @@ def complete_handover(handover_id: int) -> dict:
                     _count_inflight(conn, h["from_shift_id"]),
                     _count_inflight(conn, h["to_shift_id"]),
                     json.dumps(detail, ensure_ascii=False),
-                    _now(),
+                    now,
                 ),
             )
         else:
-            # 整批过户：无条件更新（已通过事务内全量在途校验）
+            # 整批过户：重检已全数通过在途；rowcount 兜底，异常即抛出让整事务回滚
             for it in items:
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE batches SET owner_shift_id = ? WHERE id = ? AND status = ?",
                     (h["to_shift_id"], it["batch_id"], STATUS_INFLIGHT),
                 )
+                if cur.rowcount != 1:
+                    raise HTTPException(409, "清单内批次状态并发变化，本趟过户已整单回滚")
+            _persist_rechecks(conn, handover_id, rechecks, now)
             after_from = _count_inflight(conn, h["from_shift_id"])
             after_to = _count_inflight(conn, h["to_shift_id"])
             detail = {
@@ -384,7 +458,7 @@ def complete_handover(handover_id: int) -> dict:
                 SET status = '已完成', finished_at = ?, batch_count = ?, reason = ''
                 WHERE id = ?
                 """,
-                (_now(), before, handover_id),
+                (now, before, handover_id),
             )
             conn.execute(
                 "UPDATE shifts SET status = '已交班' WHERE id = ?", (h["from_shift_id"],)
@@ -405,7 +479,7 @@ def complete_handover(handover_id: int) -> dict:
                     after_from,
                     after_to,
                     json.dumps(detail, ensure_ascii=False),
-                    _now(),
+                    now,
                 ),
             )
     # 事务提交后再读，保证返回体与落库同源

@@ -19,7 +19,7 @@ def get_batches(owner_shift_id: int | None = Query(default=None)):
 @router.post("/checks/run")
 def run_checks():
     """检查任务：到期批次标冻结。"""
-    return {"本次新冻结": 0, "冻结批次": []}
+    return svc.run_due_checks()
 
 
 @router.get("/{batch_id}")

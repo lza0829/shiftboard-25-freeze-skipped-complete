@@ -21,6 +21,12 @@ def get_one(handover_id: int):
     return svc.get_handover(handover_id)
 
 
+@router.get("/{handover_id}/adjudication")
+def get_adjudication(handover_id: int):
+    """只读裁决证明：纳入键、排除键及原因、完成时重检结果。"""
+    return svc.get_adjudication(handover_id)
+
+
 @router.post("/start")
 def start(body: StartBody):
     return svc.start_handover(body.from_shift_id, body.to_shift_id)

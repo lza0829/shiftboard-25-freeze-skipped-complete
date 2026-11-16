@@ -204,3 +204,60 @@ def test_normal_handover_still_completes(client):
     assert done.json()["status"] == "已完成"
     assert batch(client, 4)["owner_shift_id"] == 2
     assert client.get("/api/reconcile").json()[0]["一致"] is True
+
+
+def test_adjudication_proof_for_failed_handover(client):
+    # 交班单：进行中清单键被冻结 → 整单失败，完成时重检结果已固化
+    h = [x for x in client.get("/api/handovers").json() if x["status"] == "失败"][0]
+    r = client.get(f"/api/handovers/{h['id']}/adjudication")
+    assert r.status_code == 200, r.text
+    proof = r.json()
+    assert proof["handover_id"] == h["id"]
+    assert proof["status"] == "失败"
+    assert proof["纳入数"] == 1
+    assert proof["排除数"] == 3
+    assert proof["重检阻断数"] == 1
+    assert proof["重检通过数"] == 0
+    keys = {(k["biz_key"], k["outcome"]): k for k in proof["keys"]}
+    inc = keys[("B20261115-01", "纳入")]
+    assert inc["recheck_outcome"] == "阻断"
+    assert inc["recheck_status"] == "冻结"
+    assert inc["rechecked_at"]
+    # 排除键只固化发起裁决，不参与完成重检
+    exc = keys[("B20261115-03", "排除")]
+    assert exc["reason"].startswith("冻结")
+    assert exc["recheck_outcome"] is None
+
+
+def test_adjudication_proof_for_completed_handover(client):
+    h = [x for x in client.get("/api/handovers").json() if x["status"] == "已完成"][0]
+    r = client.get(f"/api/handovers/{h['id']}/adjudication")
+    assert r.status_code == 200, r.text
+    proof = r.json()
+    assert proof["纳入数"] == 1
+    assert proof["排除数"] == 3
+    assert proof["重检通过数"] == 1
+    assert proof["重检阻断数"] == 0
+    keys = {(k["biz_key"], k["outcome"]): k for k in proof["keys"]}
+    inc = keys[("B20261114-09", "纳入")]
+    assert inc["recheck_outcome"] == "通过"
+    assert inc["recheck_status"] == "在途"
+    assert inc["rechecked_at"]
+
+
+def test_handover_detail_adjudication_same_source(client):
+    # 详情页排除数与裁决证明同源：均由快照逐键记录派生，且与固化列一致
+    h = client.get("/api/handovers").json()[0]
+    d = client.get(f"/api/handovers/{h['id']}").json()
+    adj = d["adjudication"]
+    snap = d["snapshot"]
+    assert adj["纳入数"] == sum(1 for s in snap if s["outcome"] == "纳入")
+    assert adj["排除数"] == sum(1 for s in snap if s["outcome"] == "排除")
+    assert adj["排除数"] == d["excluded_count"]
+
+
+def test_adjudication_is_readonly_and_404(client):
+    r = client.get("/api/handovers/9999/adjudication")
+    assert r.status_code == 404
+    r = client.post("/api/handovers/1/adjudication")
+    assert r.status_code == 405
