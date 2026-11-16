@@ -1,0 +1,19 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "10600:10600"
+    volumes:
+      - shiftboard_data:/data
+      - ./fixtures:/fixtures:ro
+    environment:
+      DATA_DIR: /data
+      FIXTURES_DIR: /fixtures
+  frontend:
+    build: ./frontend
+    ports:
+      - "5600:80"
+    depends_on:
+      - backend
+volumes:
+  shiftboard_data:

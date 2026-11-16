@@ -1,0 +1,14 @@
+{
+  "shifts": [
+    {"id": 1, "name": "早班", "keeper": "阿陈", "status": "值班中"},
+    {"id": 2, "name": "晚班", "keeper": "小林", "status": "空闲"},
+    {"id": 3, "name": "夜班", "keeper": "老周", "status": "空闲"}
+  ],
+  "batches": [
+    {"id": 1, "biz_key": "B20261115-01", "title": "门店价目切片 A", "owner_shift_id": 1, "status": "在途", "note": "待核验", "check_due_at": "2026-11-18T10:00:00Z", "overdue_hours": 24},
+    {"id": 2, "biz_key": "B20261115-02", "title": "门店价目切片 B", "owner_shift_id": 1, "status": "在途", "note": "", "check_due_at": null, "overdue_hours": 0},
+    {"id": 3, "biz_key": "B20261115-03", "title": "库存水位补丁", "owner_shift_id": 1, "status": "在途", "note": "半成品", "check_due_at": null, "overdue_hours": 24},
+    {"id": 4, "biz_key": "B20261114-09", "title": "昨日遗留回填", "owner_shift_id": 1, "status": "在途", "note": "跨班遗留", "check_due_at": null, "overdue_hours": 0},
+    {"id": 5, "biz_key": "B20261113-02", "title": "已结清样例", "owner_shift_id": 2, "status": "已结清", "note": "不参与交班", "check_due_at": null, "overdue_hours": 0}
+  ]
+}
